@@ -222,7 +222,8 @@ aia-macro-forecaster/
 │
 ├── app.py                          # Streamlit dashboard — pipeline orchestration + UI
 │                                   # Ensemble strategy picker, per-model toggles,
-│                                   # temperature controls, market blend, Plotly charts
+│                                   # per-model temperature sliders, market blend,
+│                                   # Plotly ensemble chart
 │
 ├── src/
 │   ├── data/
@@ -231,14 +232,15 @@ aia-macro-forecaster/
 │   │
 │   ├── models/
 │   │   ├── providers.py            # Multi-provider abstraction layer
+│   │   │                           # _extract_probability_from_text() — regex fallback
 │   │   │                           # BaseForecaster (ABC)
 │   │   │                           # ClaudeForecaster      — Anthropic tool-use
 │   │   │                           # OpenAIForecaster      — GPT-4o JSON mode
 │   │   │                           # XAIForecaster         — Grok via OpenAI-compat API
 │   │   │                           # GeminiForecaster      — google-generativeai
 │   │   │                           # TemperatureSampledForecaster — paper's M=3 method
-│   │   │                           # build_cross_model_agents()
-│   │   │                           # build_temperature_agents()
+│   │   │                           # build_cross_model_agents(temperatures={...})
+│   │   │                           # build_temperature_agents(temperatures=[...])
 │   │   │                           # build_ensemble_agents()  — unified factory
 │   │   │
 │   │   ├── ensemble.py             # ThreadPoolExecutor parallel orchestrator
@@ -296,14 +298,25 @@ streamlit run app.py
 
 ## UI Configuration
 
-The sidebar exposes full control over the ensemble:
+The sidebar exposes full control over every aspect of the ensemble:
 
 **Ensemble Strategy**
-- *Cross-Model Diversity* — per-provider checkboxes to include/exclude any of the four model families
-- *Temperature Sampling (paper M=3)* — Claude model selector (Sonnet / Haiku), M slider (2–5), live temperature preview
-- *Hybrid* — both strategies combined; all controls available simultaneously
+- *Cross-Model Diversity* — per-provider checkboxes to include/exclude any of the four model families; each enabled provider has an independent temperature slider (0.0–1.0, step 0.05) shown inline
+- *Temperature Sampling (paper M=3)* — Claude model selector (Sonnet / Haiku), M slider (2–5), and an individual temperature slider per run (pre-populated with evenly-spaced defaults, fully adjustable)
+- *Hybrid* — both strategies simultaneously; all controls available
 
-**Market Prior** — optional prediction market price input; blended with calibrated LLM output using a 40/60 LLM-market simplex split (configurable)
+**Temperature controls — valid ranges by provider:**
+
+| Provider | API temperature range |
+|---|---|
+| Anthropic Claude | 0.0 – 1.0 |
+| OpenAI GPT-4o | 0.0 – 2.0 |
+| xAI Grok | 0.0 – 2.0 |
+| Google Gemini | 0.0 – 2.0 |
+
+The UI sliders cap at 1.0 for consistency; each provider's constructor clamps to its own API limit internally.
+
+**Market Prior** — optional prediction market price input; blended with calibrated LLM output at 40% LLM / 60% market (paper optimal ≈ 33/67 on liquid markets)
 
 **Quick Examples** — one-click event prefills for common macro scenarios
 
@@ -323,6 +336,31 @@ pandas>=2.2.0
 numpy>=1.26.0
 python-dotenv>=1.0.0
 ```
+
+---
+
+## Robustness & Error Handling
+
+Provider API calls are inherently unreliable — models occasionally return malformed output, drop required fields, or hit rate limits. The system handles this at three levels:
+
+**Agent-level recovery (per API call)**
+
+When a model returns a tool response missing `raw_probability`, the system attempts three recovery strategies in order before marking the agent as failed:
+
+1. **Alternate key names** — checks `probability` and `p` as fallback keys
+2. **Regex extraction from `reasoning_chain`** — three patterns in priority order:
+   - Decimal after probability keyword: `"probability of 0.72"`, `"estimate: 0.65"`
+   - Percentage phrase: `"65%"`, `"roughly 70 percent"`
+   - Bare decimal in range [0.05, 0.95] anywhere in the text
+3. **Descriptive error** — if all three fail, logs keys present and marks agent failed
+
+**Ensemble-level resilience**
+
+Failed agents are excluded from the mean calculation. The pipeline continues as long as ≥ 2 agents succeed. Failed agents are listed in the UI under a collapsible warning panel.
+
+**Temperature clamping**
+
+Each provider's constructor clamps temperature to its API's valid range (0–1 for Claude, 0–2 for others) regardless of slider input, preventing `400 invalid_request_error` failures.
 
 ---
 

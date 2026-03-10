@@ -170,15 +170,19 @@ def get_calibrator() -> ProbabilityCalibrator:
 def get_ensemble_orchestrator(
     strategy: str,
     enabled_providers: list,
+    provider_temperatures: dict,
     temp_model: str,
     m: int,
+    sampling_temperatures: list,
 ) -> EnsembleOrchestrator:
     """Build a fresh orchestrator based on user-selected ensemble config."""
     agents = build_ensemble_agents(
         strategy=strategy,
         enabled_providers=enabled_providers if strategy != "temperature" else None,
+        provider_temperatures=provider_temperatures,
         temp_model=temp_model,
         m=m,
+        sampling_temperatures=sampling_temperatures if sampling_temperatures else None,
     )
     return EnsembleOrchestrator(agents=agents, max_workers=len(agents))
 
@@ -218,8 +222,10 @@ def run_pipeline(
     market_price: Optional[float],
     ensemble_strategy: str,
     enabled_providers: list,
+    provider_temperatures: dict,
     temp_model: str,
     m: int,
+    sampling_temperatures: list,
 ) -> None:
     """Execute all four pipeline stages and store results in session state."""
     for k in ["ensemble_result","supervisor_result","calibrated_prob",
@@ -234,8 +240,10 @@ def run_pipeline(
         orchestrator = get_ensemble_orchestrator(
             strategy=ensemble_strategy,
             enabled_providers=enabled_providers,
+            provider_temperatures=provider_temperatures,
             temp_model=temp_model,
             m=m,
+            sampling_temperatures=sampling_temperatures,
         )
     except Exception as exc:
         st.session_state.pipeline_error = f"Ensemble configuration failed: {exc}"
@@ -592,30 +600,44 @@ def main():
         )
         ensemble_strategy = strategy_labels[strategy_choice]
 
-        # Cross-model provider toggles
+        # Cross-model provider toggles + per-provider temperature sliders
         enabled_providers: list = list(_PROVIDER_REGISTRY.keys())
+        provider_temperatures: dict = {}
         if ensemble_strategy in ("cross_model", "hybrid"):
-            st.markdown("**Providers to include:**")
+            st.markdown("**Providers & temperatures:**")
             enabled_providers = []
-            cols_cb = st.columns(2)
             provider_list = list(_PROVIDER_REGISTRY.keys())
-            for i, provider in enumerate(provider_list):
-                default_colors = {
-                    "Claude Haiku": "🟠", "OpenAI GPT-4o": "🟢",
-                    "xAI Grok-4": "🔵", "Google Gemini": "🔴",
-                }
-                emoji = default_colors.get(provider, "⚪")
-                with cols_cb[i % 2]:
-                    if st.checkbox(f"{emoji} {provider}", value=True, key=f"cb_{provider}"):
-                        enabled_providers.append(provider)
+            provider_emojis = {
+                "Claude Haiku": "🟠", "OpenAI GPT-4o": "🟢",
+                "xAI Grok-4": "🔵", "Google Gemini": "🔴",
+            }
+            for provider in provider_list:
+                emoji = provider_emojis.get(provider, "⚪")
+                col_cb, col_sl = st.columns([0.38, 0.62])
+                with col_cb:
+                    enabled = st.checkbox(
+                        f"{emoji} {provider}", value=True, key=f"cb_{provider}",
+                    )
+                with col_sl:
+                    t = st.slider(
+                        "T", min_value=0.0, max_value=1.0, value=0.3, step=0.05,
+                        key=f"temp_{provider}",
+                        disabled=not enabled,
+                        label_visibility="collapsed",
+                        help=f"Sampling temperature for {provider}. Range 0–1 (Claude/Gemini) or 0–2 (OpenAI/Grok).",
+                    )
+                if enabled:
+                    enabled_providers.append(provider)
+                    provider_temperatures[provider] = t
             if not enabled_providers:
                 st.warning("Select at least one provider.")
 
-        # Temperature sampling controls
+        # Temperature sampling controls + per-run sliders
         temp_model = "claude-sonnet-4-6"
         m_value = 3
+        sampling_temperatures: list = []
         if ensemble_strategy in ("temperature", "hybrid"):
-            st.markdown("**Temperature sampling config:**")
+            st.markdown("**Temperature sampling:**")
             temp_model = st.selectbox(
                 "Claude model",
                 ["claude-sonnet-4-6", "claude-haiku-4-5"],
@@ -623,17 +645,26 @@ def main():
                 help="claude-sonnet-4-6 gives higher quality; claude-haiku-4-5 is faster and cheaper.",
             )
             m_value = st.slider(
-                "M (number of samples)",
-                min_value=2, max_value=5, value=3, step=1,
-                help="Paper uses M=10. M=3 is cost-efficient for prototyping. Temperatures evenly spaced from 0.3 to 1.1.",
+                "M (samples)", min_value=2, max_value=5, value=3, step=1,
+                help="Paper uses M=10. M=3 is cost-efficient. Each run gets its own temperature below.",
             )
-            # Show the temperature values that will be used
+            # Default even spacing, user can adjust each run individually
             if m_value > 1:
-                step = (1.0 - 0.3) / (m_value - 1)
-                temps = [round(0.3 + step * i, 2) for i in range(m_value)]
+                default_step = (1.0 - 0.3) / (m_value - 1)
+                default_temps = [round(0.3 + default_step * i, 2) for i in range(m_value)]
             else:
-                temps = [0.7]
-            st.caption(f"Temperatures: {temps}")
+                default_temps = [0.7]
+
+            st.markdown("**Per-run temperatures:**")
+            for i, default_t in enumerate(default_temps, start=1):
+                t = st.slider(
+                    f"Run {i}",
+                    min_value=0.0, max_value=1.0,
+                    value=default_t, step=0.05,
+                    key=f"sampling_temp_{i}",
+                    help=f"Temperature for Claude sampling run {i}.",
+                )
+                sampling_temperatures.append(t)
 
         # ── Market prior ─────────────────────────────────────────────────
         st.markdown("---")
@@ -690,8 +721,10 @@ def main():
             market_price=market_price_input,
             ensemble_strategy=ensemble_strategy,
             enabled_providers=enabled_providers,
+            provider_temperatures=provider_temperatures,
             temp_model=temp_model,
             m=m_value,
+            sampling_temperatures=sampling_temperatures,
         )
 
     # Error display

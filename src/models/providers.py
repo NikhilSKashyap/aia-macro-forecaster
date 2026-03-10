@@ -123,6 +123,57 @@ def _parse_json_response(text: str, provider: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Probability extraction fallback
+# ---------------------------------------------------------------------------
+
+def _extract_probability_from_text(text: str, provider: str) -> Optional[float]:
+    """
+    Last-resort extraction of a probability value from free-form reasoning text.
+    Tries several patterns in priority order:
+
+      1. Explicit decimal:  "probability of 0.72"  /  "estimate: 0.65"
+      2. Percentage phrase: "I estimate 65%"  /  "roughly 70 percent"
+      3. Any bare decimal in [0.01, 0.99] near a probability keyword
+
+    Returns the first plausible match as a float, or None if nothing found.
+    """
+    if not text:
+        return None
+
+    # Pattern 1 — decimal immediately after a probability keyword
+    m = re.search(
+        r"(?:probability|likelihood|chance|estimate|assess|forecast)"
+        r"[\w\s,\-]*?(?:of|at|is|:)?\s*(0\.\d{1,4}|\.\d{1,4})",
+        text, re.IGNORECASE,
+    )
+    if m:
+        val = float(m.group(1))
+        if 0.01 <= val <= 0.99:
+            logger.warning("[%s] Extracted probability %.3f from reasoning text (pattern 1).", provider, val)
+            return val
+
+    # Pattern 2 — percentage (e.g. "65%", "65 percent")
+    m = re.search(
+        r"(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        val = float(m.group(1)) / 100.0
+        if 0.01 <= val <= 0.99:
+            logger.warning("[%s] Extracted probability %.3f from percentage in reasoning text (pattern 2).", provider, val)
+            return val
+
+    # Pattern 3 — any standalone decimal in valid range (last resort)
+    for match in re.finditer(r"\b(0\.\d{2,4})\b", text):
+        val = float(match.group(1))
+        if 0.05 <= val <= 0.95:
+            logger.warning("[%s] Extracted probability %.3f from bare decimal in reasoning text (pattern 3).", provider, val)
+            return val
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Abstract base
 # ---------------------------------------------------------------------------
 
@@ -157,8 +208,16 @@ class BaseForecaster(ABC):
             data = self._call_api(event, snippets)
             latency_ms = (time.perf_counter() - t0) * 1000
 
-            # Defensive extraction — models occasionally omit a field
+            # Defensive extraction — models occasionally omit the probability field
             raw = data.get("raw_probability") or data.get("probability") or data.get("p")
+
+            if raw is None:
+                # Attempt regex extraction from reasoning_chain before failing
+                raw = _extract_probability_from_text(
+                    data.get("reasoning_chain", ""),
+                    self.provider_name,
+                )
+
             if raw is None:
                 raise ValueError(
                     f"No probability field in response. Keys present: {list(data.keys())}"
@@ -213,11 +272,12 @@ class ClaudeForecaster(BaseForecaster):
         },
     }
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, temperature: float = 0.3, api_key: Optional[str] = None):
         key = api_key or os.environ.get("ANTHROPIC_API_KEY")
         if not key:
             raise ValueError("ANTHROPIC_API_KEY not set.")
         self._client = anthropic.Anthropic(api_key=key)
+        self._temperature = max(0.0, min(temperature, 1.0))
 
     @property
     def provider_name(self) -> str:
@@ -234,6 +294,7 @@ class ClaudeForecaster(BaseForecaster):
             system=_AGENT_SYSTEM_PROMPT,
             tools=[self._TOOL],
             tool_choice={"type": "any"},
+            temperature=self._temperature,
             messages=[{"role": "user", "content": _build_user_message(event, snippets)}],
         )
         for block in response.content:
@@ -251,11 +312,12 @@ class OpenAIForecaster(BaseForecaster):
     OpenAI GPT-4o agent. Uses JSON mode for structured output.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, temperature: float = 0.3, api_key: Optional[str] = None):
         key = api_key or os.environ.get("OPENAI_API_KEY")
         if not key:
             raise ValueError("OPENAI_API_KEY not set.")
         self._client = OpenAI(api_key=key)
+        self._temperature = max(0.0, min(temperature, 2.0))  # OpenAI allows up to 2.0
 
     @property
     def provider_name(self) -> str:
@@ -274,7 +336,7 @@ class OpenAIForecaster(BaseForecaster):
                 {"role": "user", "content": _build_user_message(event, snippets)},
             ],
             max_tokens=1024,
-            temperature=0.3,
+            temperature=self._temperature,
         )
         text = response.choices[0].message.content or ""
         return _parse_json_response(text, self.provider_name)
@@ -291,11 +353,12 @@ class XAIForecaster(BaseForecaster):
     on geopolitical and market events.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, temperature: float = 0.3, api_key: Optional[str] = None):
         key = api_key or os.environ.get("XAI_API_KEY")
         if not key:
             raise ValueError("XAI_API_KEY not set.")
         self._client = OpenAI(api_key=key, base_url="https://api.x.ai/v1")
+        self._temperature = max(0.0, min(temperature, 2.0))
 
     @property
     def provider_name(self) -> str:
@@ -313,7 +376,7 @@ class XAIForecaster(BaseForecaster):
                 {"role": "user", "content": _build_user_message(event, snippets)},
             ],
             max_tokens=1024,
-            temperature=0.3,
+            temperature=self._temperature,
         )
         text = response.choices[0].message.content or ""
         return _parse_json_response(text, self.provider_name)
@@ -330,7 +393,7 @@ class GeminiForecaster(BaseForecaster):
     different document-level reasoning patterns vs. other providers.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, temperature: float = 0.3, api_key: Optional[str] = None):
         key = api_key or os.environ.get("GEMINI_API_KEY")
         if not key:
             raise ValueError("GEMINI_API_KEY not set.")
@@ -339,6 +402,7 @@ class GeminiForecaster(BaseForecaster):
             model_name=self.model_id,
             system_instruction=_AGENT_SYSTEM_PROMPT,
         )
+        self._temperature = max(0.0, min(temperature, 2.0))
 
     @property
     def provider_name(self) -> str:
@@ -352,9 +416,9 @@ class GeminiForecaster(BaseForecaster):
         response = self._model.generate_content(
             _build_user_message(event, snippets),
             generation_config=genai.types.GenerationConfig(
-                temperature=0.3,
-                max_output_tokens=4096,  # Gemini is verbose; 1024 truncates mid-JSON
-                response_mime_type="application/json",  # forces valid JSON output
+                temperature=self._temperature,
+                max_output_tokens=4096,
+                response_mime_type="application/json",
             ),
         )
         text = response.text or ""
@@ -479,6 +543,7 @@ _PROVIDER_REGISTRY: dict[str, type] = {
 
 def build_cross_model_agents(
     enabled: Optional[List[str]] = None,
+    temperatures: Optional[dict] = None,
 ) -> List[BaseForecaster]:
     """
     Build cross-model ensemble agents for the selected providers.
@@ -486,16 +551,20 @@ def build_cross_model_agents(
     Parameters
     ----------
     enabled : List[str] | None
-        Provider display names to include (e.g. ["Claude Haiku", "OpenAI GPT-4o"]).
-        Defaults to all four if None.
+        Provider display names to include. Defaults to all four if None.
+    temperatures : dict | None
+        Per-provider temperature overrides, keyed by provider display name.
+        E.g. {"Claude Haiku": 0.5, "OpenAI GPT-4o": 0.7}
+        Missing keys use each provider's default (0.3).
 
     Returns
     -------
     List[BaseForecaster]
-        Instantiated agents for all enabled + available providers.
     """
     if enabled is None:
         enabled = list(_PROVIDER_REGISTRY.keys())
+    if temperatures is None:
+        temperatures = {}
 
     agents: List[BaseForecaster] = []
     for name in enabled:
@@ -504,8 +573,9 @@ def build_cross_model_agents(
             logger.warning("Unknown provider '%s' — skipping.", name)
             continue
         try:
-            agents.append(cls())
-            logger.info("Registered cross-model agent: %s", name)
+            temp = temperatures.get(name, 0.3)
+            agents.append(cls(temperature=temp))
+            logger.info("Registered cross-model agent: %s T=%.2f", name, temp)
         except ValueError as exc:
             logger.warning("Skipping %s — %s", name, exc)
 
@@ -562,8 +632,10 @@ def build_temperature_agents(
 def build_ensemble_agents(
     strategy: str = "cross_model",
     enabled_providers: Optional[List[str]] = None,
+    provider_temperatures: Optional[dict] = None,
     temp_model: str = "claude-sonnet-4-6",
     m: int = 3,
+    sampling_temperatures: Optional[List[float]] = None,
 ) -> List[BaseForecaster]:
     """
     Unified factory. Builds the agent list based on ensemble strategy.
@@ -589,10 +661,12 @@ def build_ensemble_agents(
     agents: List[BaseForecaster] = []
 
     if strategy in ("cross_model", "hybrid"):
-        agents.extend(build_cross_model_agents(enabled_providers))
+        agents.extend(build_cross_model_agents(enabled_providers, provider_temperatures))
 
     if strategy in ("temperature", "hybrid"):
-        agents.extend(build_temperature_agents(model=temp_model, m=m))
+        agents.extend(build_temperature_agents(
+            model=temp_model, m=m, temperatures=sampling_temperatures,
+        ))
 
     if not agents:
         raise RuntimeError("No agents could be initialised for the selected strategy.")
