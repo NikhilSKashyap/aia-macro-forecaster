@@ -28,53 +28,53 @@ This prototype faithfully implements every layer of that pipeline. The ensemble 
 │  └──────┬──────┘                                                    │
 │         │ context injected into all agents simultaneously           │
 │         ▼                                                           │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │         STAGE 1 — PARALLEL ENSEMBLE  [configurable]      │      │
-│  │                                                          │      │
-│  │  Mode A: Cross-Model Diversity (our extension)           │      │
-│  │  ┌────────────┐ ┌──────────┐ ┌───────────┐ ┌─────────┐ │      │
-│  │  │Claude Haiku│ │ GPT-4o   │ │Grok-4-lat.│ │Gemini   │ │      │
-│  │  └────────────┘ └──────────┘ └───────────┘ └─────────┘ │      │
-│  │                                                          │      │
-│  │  Mode B: Temperature Sampling (paper method, M=3)        │      │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐    │      │
-│  │  │ Claude T=0.3 │ │ Claude T=0.65│ │ Claude T=1.0 │    │      │
-│  │  └──────────────┘ └──────────────┘ └──────────────┘    │      │
-│  │                                                          │      │
-│  │  Mode C: Hybrid (both combined, up to 7 agents)          │      │
-│  │                                                          │      │
-│  │              Simple Mean  p̄ = (1/n)Σpᵢ                  │      │
-│  └──────────────────────────┬───────────────────────────────┘      │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │         STAGE 1 — PARALLEL ENSEMBLE  [configurable]      │       │
+│  │                                                          │       │
+│  │  Mode A: Cross-Model Diversity (our extension)           │       │
+│  │  ┌────────────┐ ┌──────────┐ ┌───────────┐ ┌─────────┐   │       │
+│  │  │Claude Haiku│ │ GPT-4o   │ │Grok-4-lat.│ │Gemini   │   │       │
+│  │  └────────────┘ └──────────┘ └───────────┘ └─────────┘   │       │
+│  │                                                          │       │
+│  │  Mode B: Temperature Sampling (paper method, M=3)        │       │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐      │       │
+│  │  │ Claude T=0.3 │ │ Claude T=0.65│ │ Claude T=1.0 │      │       │
+│  │  └──────────────┘ └──────────────┘ └──────────────┘      │       │
+│  │                                                          │       │
+│  │  Mode C: Hybrid (both combined, up to 7 agents)          │       │
+│  │                                                          │       │
+│  │              Simple Mean  p̄ = (1/n)Σpᵢ                   │       │
+│  └──────────────────────────┬───────────────────────────────┘       │
 │                             │                                       │
 │                             ▼                                       │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │         STAGE 2 — CLAUDE SONNET SUPERVISOR               │      │
-│  │                                                          │      │
-│  │  Reads all reasoning traces → identifies disagreements   │      │
-│  │  → issues targeted queries → confidence-gates output:    │      │
-│  │                                                          │      │
-│  │  HIGH confidence  →  supervisor p replaces ensemble mean │      │
-│  │  MED / LOW        →  ensemble mean preserved             │      │
-│  └──────────────────────────┬───────────────────────────────┘      │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │         STAGE 2 — CLAUDE SONNET SUPERVISOR               │       │
+│  │                                                          │       │
+│  │  Reads all reasoning traces → identifies disagreements   │       │
+│  │  → issues targeted queries → confidence-gates output:    │       │
+│  │                                                          │       │
+│  │  HIGH confidence  →  supervisor p replaces ensemble mean │       │
+│  │  MED / LOW        →  ensemble mean preserved             │       │
+│  └──────────────────────────┬───────────────────────────────┘       │
 │                             │                                       │
 │                             ▼                                       │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │         STAGE 3 — PLATT SCALING  (α = √3)                │      │
-│  │                                                          │      │
-│  │         p̂ = σ(√3 · logit(p))                            │      │
-│  │                                                          │      │
-│  │  Extremizes hedged LLM probabilities away from 0.5       │      │
-│  │  Fixed α avoids overfitting on small calibration sets    │      │
-│  └──────────────────────────┬───────────────────────────────┘      │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │         STAGE 3 — PLATT SCALING  (α = √3)                │       │
+│  │                                                          │       │
+│  │         p̂ = σ(√3 · logit(p))                             │       │
+│  │                                                          │       │
+│  │  Extremizes hedged LLM probabilities away from 0.5       │       │
+│  │  Fixed α avoids overfitting on small calibration sets    │       │
+│  └──────────────────────────┬───────────────────────────────┘       │
 │                             │                                       │
 │                             ▼                                       │
-│  ┌──────────────────────────────────────────────────────────┐      │
-│  │   STAGE 4 — OPTIONAL MARKET BLEND  (simplex regression)  │      │
-│  │                                                          │      │
-│  │   p_final = α_LLM · p̂_LLM + (1-α_LLM) · p_market        │      │
-│  │   default: α_LLM = 0.40  (paper optimal ≈ 0.33 on        │      │
-│  │   liquid markets, 0.87 on easier benchmarks)             │      │
-│  └──────────────────────────────────────────────────────────┘      │
+│  ┌──────────────────────────────────────────────────────────┐       │
+│  │   STAGE 4 — OPTIONAL MARKET BLEND  (simplex regression)  │       │
+│  │                                                          │       │ 
+│  │   p_final = α_LLM · p̂_LLM + (1-α_LLM) · p_market         │       │
+│  │   default: α_LLM = 0.40  (paper optimal ≈ 0.33 on        │       │
+│  │   liquid markets, 0.87 on easier benchmarks)             │       │
+│  └──────────────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
