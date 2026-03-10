@@ -174,6 +174,7 @@ def get_ensemble_orchestrator(
     temp_model: str,
     m: int,
     sampling_temperatures: list,
+    api_keys: dict,
 ) -> EnsembleOrchestrator:
     """Build a fresh orchestrator based on user-selected ensemble config."""
     agents = build_ensemble_agents(
@@ -183,13 +184,13 @@ def get_ensemble_orchestrator(
         temp_model=temp_model,
         m=m,
         sampling_temperatures=sampling_temperatures if sampling_temperatures else None,
+        api_keys=api_keys,
     )
     return EnsembleOrchestrator(agents=agents, max_workers=len(agents))
 
-@st.cache_resource(show_spinner=False)
-def get_supervisor() -> Optional[SupervisorAgent]:
+def get_supervisor(api_key: Optional[str] = None) -> Optional[SupervisorAgent]:
     try:
-        return SupervisorAgent()
+        return SupervisorAgent(api_key=api_key or None)
     except Exception as exc:
         logger.warning("Supervisor unavailable: %s", exc)
         return None
@@ -226,6 +227,7 @@ def run_pipeline(
     temp_model: str,
     m: int,
     sampling_temperatures: list,
+    api_keys: dict,
 ) -> None:
     """Execute all four pipeline stages and store results in session state."""
     for k in ["ensemble_result","supervisor_result","calibrated_prob",
@@ -233,7 +235,7 @@ def run_pipeline(
         st.session_state[k] = None
 
     fetcher    = MacroDataFetcher(num_snippets=6)
-    supervisor = get_supervisor()
+    supervisor = get_supervisor(api_key=api_keys.get("ANTHROPIC_API_KEY"))
     calibrator = get_calibrator()
 
     try:
@@ -244,6 +246,7 @@ def run_pipeline(
             temp_model=temp_model,
             m=m,
             sampling_temperatures=sampling_temperatures,
+            api_keys=api_keys,
         )
     except Exception as exc:
         st.session_state.pipeline_error = f"Ensemble configuration failed: {exc}"
@@ -570,6 +573,55 @@ def main():
         st.markdown("## ⚙️ Forecast Configuration")
         st.markdown("---")
 
+        # ── API Keys ─────────────────────────────────────────────────────
+        with st.expander("🔑 API Keys", expanded=not any([
+            os.environ.get("ANTHROPIC_API_KEY"),
+            os.environ.get("OPENAI_API_KEY"),
+        ])):
+            st.caption(
+                "Keys entered here override environment variables. "
+                "They are used only for this session and never stored."
+            )
+            ui_anthropic = st.text_input(
+                "Anthropic API Key", type="password",
+                placeholder="sk-ant-... (required)",
+                value=st.session_state.get("key_anthropic", ""),
+                help="Used for Claude Haiku agent and Claude Sonnet supervisor.",
+            )
+            ui_openai = st.text_input(
+                "OpenAI API Key", type="password",
+                placeholder="sk-proj-...",
+                value=st.session_state.get("key_openai", ""),
+            )
+            ui_xai = st.text_input(
+                "xAI API Key", type="password",
+                placeholder="xai-...",
+                value=st.session_state.get("key_xai", ""),
+            )
+            ui_gemini = st.text_input(
+                "Gemini API Key", type="password",
+                placeholder="AIza...",
+                value=st.session_state.get("key_gemini", ""),
+            )
+            # Persist in session state so values survive reruns
+            st.session_state["key_anthropic"] = ui_anthropic
+            st.session_state["key_openai"]    = ui_openai
+            st.session_state["key_xai"]       = ui_xai
+            st.session_state["key_gemini"]    = ui_gemini
+
+        # Resolve: UI input takes priority; fall back to env var
+        api_keys = {
+            "ANTHROPIC_API_KEY": ui_anthropic or os.environ.get("ANTHROPIC_API_KEY", ""),
+            "OPENAI_API_KEY":    ui_openai    or os.environ.get("OPENAI_API_KEY", ""),
+            "XAI_API_KEY":       ui_xai       or os.environ.get("XAI_API_KEY", ""),
+            "GEMINI_API_KEY":    ui_gemini    or os.environ.get("GEMINI_API_KEY", ""),
+        }
+
+        if not api_keys["ANTHROPIC_API_KEY"]:
+            st.warning("Anthropic API key required to run.", icon="⚠️")
+
+        st.markdown("---")
+
         event_input = st.text_area(
             "Target Macroeconomic Event",
             value="Will the Federal Reserve cut interest rates by 25bps at the next FOMC meeting?",
@@ -725,6 +777,7 @@ def main():
             temp_model=temp_model,
             m=m_value,
             sampling_temperatures=sampling_temperatures,
+            api_keys=api_keys,
         )
 
     # Error display

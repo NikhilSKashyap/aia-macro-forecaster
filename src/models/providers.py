@@ -544,6 +544,7 @@ _PROVIDER_REGISTRY: dict[str, type] = {
 def build_cross_model_agents(
     enabled: Optional[List[str]] = None,
     temperatures: Optional[dict] = None,
+    api_keys: Optional[dict] = None,
 ) -> List[BaseForecaster]:
     """
     Build cross-model ensemble agents for the selected providers.
@@ -553,9 +554,11 @@ def build_cross_model_agents(
     enabled : List[str] | None
         Provider display names to include. Defaults to all four if None.
     temperatures : dict | None
-        Per-provider temperature overrides, keyed by provider display name.
-        E.g. {"Claude Haiku": 0.5, "OpenAI GPT-4o": 0.7}
-        Missing keys use each provider's default (0.3).
+        Per-provider temperature overrides keyed by display name.
+    api_keys : dict | None
+        Explicit API keys keyed by env-var name, e.g.
+        {"ANTHROPIC_API_KEY": "sk-ant-...", "OPENAI_API_KEY": "sk-proj-..."}.
+        Falls back to environment variables when a key is absent or None.
 
     Returns
     -------
@@ -565,6 +568,16 @@ def build_cross_model_agents(
         enabled = list(_PROVIDER_REGISTRY.keys())
     if temperatures is None:
         temperatures = {}
+    if api_keys is None:
+        api_keys = {}
+
+    # Map provider display name → the env-var key it needs
+    _PROVIDER_KEY_ENV = {
+        "Claude Haiku":   "ANTHROPIC_API_KEY",
+        "OpenAI GPT-4o":  "OPENAI_API_KEY",
+        "xAI Grok-4":     "XAI_API_KEY",
+        "Google Gemini":  "GEMINI_API_KEY",
+    }
 
     agents: List[BaseForecaster] = []
     for name in enabled:
@@ -573,8 +586,10 @@ def build_cross_model_agents(
             logger.warning("Unknown provider '%s' — skipping.", name)
             continue
         try:
-            temp = temperatures.get(name, 0.3)
-            agents.append(cls(temperature=temp))
+            temp    = temperatures.get(name, 0.3)
+            env_key = _PROVIDER_KEY_ENV.get(name)
+            api_key = api_keys.get(env_key) if env_key else None
+            agents.append(cls(temperature=temp, api_key=api_key or None))
             logger.info("Registered cross-model agent: %s T=%.2f", name, temp)
         except ValueError as exc:
             logger.warning("Skipping %s — %s", name, exc)
@@ -588,6 +603,7 @@ def build_temperature_agents(
     model: str = "claude-sonnet-4-6",
     m: int = 3,
     temperatures: Optional[List[float]] = None,
+    api_key: Optional[str] = None,
 ) -> List[BaseForecaster]:
     """
     Build M temperature-sampled Claude agents (paper's original method).
@@ -599,7 +615,9 @@ def build_temperature_agents(
     m : int
         Number of independent samples (paper uses M=10; we default to M=3).
     temperatures : List[float] | None
-        Explicit temperature values. If None, evenly spaced from 0.3 to 1.1.
+        Explicit temperature values. If None, evenly spaced from 0.3 to 1.0.
+    api_key : str | None
+        Anthropic API key. Falls back to ANTHROPIC_API_KEY env var.
 
     Returns
     -------
@@ -619,6 +637,7 @@ def build_temperature_agents(
                 temperature=temp,
                 run_index=i,
                 model=model,
+                api_key=api_key or None,
             ))
             logger.info("Registered temperature agent: %s T=%.2f", model, temp)
         except ValueError as exc:
@@ -636,6 +655,7 @@ def build_ensemble_agents(
     temp_model: str = "claude-sonnet-4-6",
     m: int = 3,
     sampling_temperatures: Optional[List[float]] = None,
+    api_keys: Optional[dict] = None,
 ) -> List[BaseForecaster]:
     """
     Unified factory. Builds the agent list based on ensemble strategy.
@@ -661,11 +681,15 @@ def build_ensemble_agents(
     agents: List[BaseForecaster] = []
 
     if strategy in ("cross_model", "hybrid"):
-        agents.extend(build_cross_model_agents(enabled_providers, provider_temperatures))
+        agents.extend(build_cross_model_agents(
+            enabled_providers, provider_temperatures, api_keys,
+        ))
 
     if strategy in ("temperature", "hybrid"):
+        anthropic_key = (api_keys or {}).get("ANTHROPIC_API_KEY")
         agents.extend(build_temperature_agents(
             model=temp_model, m=m, temperatures=sampling_temperatures,
+            api_key=anthropic_key or None,
         ))
 
     if not agents:
